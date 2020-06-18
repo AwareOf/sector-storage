@@ -16,10 +16,10 @@ type OfflineRemoteWorker struct {
 	Ts       int64 `json:"ts"`
 }
 
-type Process uint8
+type SectorStage uint8
 
 const (
-	AddPiece Process = iota
+	AddPiece SectorStage = iota
 	SealPreCommit1
 	SealPreCommit2
 	SealCommit1
@@ -30,7 +30,7 @@ const (
 type SectorProcess struct {
 	SectorID uint64 `json:"sectorID"`
 	Hostname string `json:"hostname"`
-	Process  uint8 `json:"process"`
+	SectorStage  uint8 `json:"sectorStage"`
 	Success  bool `json:"success"`
 	Ts       int64 `json:"ts"`
 }
@@ -64,13 +64,13 @@ func TriggerWorkerOffline(hostname string, socket string) error {
 	return TriggerWebHook(url, jsonValue)
 }
 
-func TriggerSectorProcess(hostname string, process Process, sectorID abi.SectorNumber, success bool) error {
+func TriggerSectorProcess(hostname string, sectorStage SectorStage, sectorID abi.SectorNumber, success bool) error {
 	url := os.Getenv("WEBHOOK_SECTOR_PROCESS")
 	if url == "" {
 		return xerrors.Errorf("can not find WEBHOOK_SECTOR_PROCESS environment variable")
 	}
 
-	data := &SectorProcess{uint64(sectorID), hostname, uint8(process), success, makeTimestamp()}
+	data := &SectorProcess{uint64(sectorID), hostname, uint8(sectorStage), success, makeTimestamp()}
 
 	jsonValue, err := json.Marshal(data)
 	if err != nil {

@@ -95,7 +95,7 @@ func (l *LocalWorker) NewSector(ctx context.Context, sector abi.SectorID) error 
 	return sb.NewSector(ctx, sector)
 }
 
-func (l *LocalWorker) triggerWebHook(ctx context.Context, sector abi.SectorID, err error, process Process)  {
+func (l *LocalWorker) triggerWebHook(ctx context.Context, sector abi.SectorID, err error, sectorStage SectorStage)  {
 	go func() {
 		workerInfo, _ := l.Info(ctx)
 		hostname := workerInfo.Hostname
@@ -104,7 +104,7 @@ func (l *LocalWorker) triggerWebHook(ctx context.Context, sector abi.SectorID, e
 			success = false
 		}
 
-		_ = TriggerSectorProcess(hostname, process, sector.Number, success)
+		_ = TriggerSectorProcess(hostname, sectorStage, sector.Number, success)
 	}()
 }
 

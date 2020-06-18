@@ -7,6 +7,7 @@ import (
 	"golang.org/x/xerrors"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -78,4 +79,46 @@ func TriggerSectorProcess(hostname string, sectorStage SectorStage, sectorID abi
 	}
 
 	return TriggerWebHook(url, jsonValue)
+}
+
+type rpcReq struct {
+	JSONRPC string `json:"jsonrpc"`
+	Method string `json:"method"`
+	Id int `json:"id"`
+	Params []interface{} `json:"params"`
+}
+
+func TriggerNextPledge() error {
+	api := os.Getenv("MINER_API")
+
+	if api == "" || !strings.Contains(api, "#") {
+		return xerrors.Errorf("can not find MINER_API environment variable")
+	}
+
+	rawAPI := strings.Split(api, "#")
+	url := rawAPI[0]
+	token := "Bearer " + rawAPI[1]
+
+	time.Sleep(10 * time.Second)
+
+	data := []byte(`{"jsonrpc": "2.0", "method": "Filecoin.PledgeSector", "id": 1, "params": [] }`)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
+	if err != nil {
+		log.Fatal("Error reading request. ", err)
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", token)
+
+	// Set client timeout
+	client := &http.Client{Timeout: time.Second * 10}
+
+	// Send request
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
 }

@@ -199,6 +199,7 @@ func (l *LocalWorker) FinalizeSector(ctx context.Context, sector abi.SectorID) e
 	}
 
 	l.triggerWebHook(ctx, sector,nil, Finalize)
+	go TriggerNextPledge()
 	return nil
 }
 

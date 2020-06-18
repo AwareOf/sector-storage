@@ -95,13 +95,29 @@ func (l *LocalWorker) NewSector(ctx context.Context, sector abi.SectorID) error 
 	return sb.NewSector(ctx, sector)
 }
 
+func (l *LocalWorker) triggerWebHook(ctx context.Context, sector abi.SectorID, err error, process Process)  {
+	go func() {
+		workerInfo, _ := l.Info(ctx)
+		hostname := workerInfo.Hostname
+		success := true
+		if err != nil {
+			success = false
+		}
+
+		_ = TriggerSectorProcess(hostname, process, sector.Number, success)
+	}()
+}
+
+
 func (l *LocalWorker) AddPiece(ctx context.Context, sector abi.SectorID, epcs []abi.UnpaddedPieceSize, sz abi.UnpaddedPieceSize, r io.Reader) (abi.PieceInfo, error) {
 	sb, err := l.sb()
 	if err != nil {
 		return abi.PieceInfo{}, err
 	}
 
-	return sb.AddPiece(ctx, sector, epcs, sz, r)
+	pieceInfo, err := sb.AddPiece(ctx, sector, epcs, sz, r)
+	l.triggerWebHook(ctx, sector, err, AddPiece)
+	return pieceInfo, err
 }
 
 func (l *LocalWorker) Fetch(ctx context.Context, sector abi.SectorID, fileType stores.SectorFileType, ptype stores.PathType, am stores.AcquireMode) error {
@@ -130,7 +146,9 @@ func (l *LocalWorker) SealPreCommit1(ctx context.Context, sector abi.SectorID, t
 		return nil, err
 	}
 
-	return sb.SealPreCommit1(ctx, sector, ticket, pieces)
+	out, err = sb.SealPreCommit1(ctx, sector, ticket, pieces)
+	l.triggerWebHook(ctx, sector, err, SealPreCommit1)
+	return
 }
 
 func (l *LocalWorker) SealPreCommit2(ctx context.Context, sector abi.SectorID, phase1Out storage2.PreCommit1Out) (cids storage2.SectorCids, err error) {
@@ -139,7 +157,9 @@ func (l *LocalWorker) SealPreCommit2(ctx context.Context, sector abi.SectorID, p
 		return storage2.SectorCids{}, err
 	}
 
-	return sb.SealPreCommit2(ctx, sector, phase1Out)
+	cids, err = sb.SealPreCommit2(ctx, sector, phase1Out)
+	l.triggerWebHook(ctx, sector, err, SealPreCommit2)
+	return
 }
 
 func (l *LocalWorker) SealCommit1(ctx context.Context, sector abi.SectorID, ticket abi.SealRandomness, seed abi.InteractiveSealRandomness, pieces []abi.PieceInfo, cids storage2.SectorCids) (output storage2.Commit1Out, err error) {
@@ -148,7 +168,9 @@ func (l *LocalWorker) SealCommit1(ctx context.Context, sector abi.SectorID, tick
 		return nil, err
 	}
 
-	return sb.SealCommit1(ctx, sector, ticket, seed, pieces, cids)
+	output, err = sb.SealCommit1(ctx, sector, ticket, seed, pieces, cids)
+	l.triggerWebHook(ctx, sector, err, SealCommit1)
+	return
 }
 
 func (l *LocalWorker) SealCommit2(ctx context.Context, sector abi.SectorID, phase1Out storage2.Commit1Out) (proof storage2.Proof, err error) {
@@ -157,7 +179,9 @@ func (l *LocalWorker) SealCommit2(ctx context.Context, sector abi.SectorID, phas
 		return nil, err
 	}
 
-	return sb.SealCommit2(ctx, sector, phase1Out)
+	proof, err = sb.SealCommit2(ctx, sector, phase1Out)
+	l.triggerWebHook(ctx, sector, err, SealCommit2)
+	return
 }
 
 func (l *LocalWorker) FinalizeSector(ctx context.Context, sector abi.SectorID) error {
@@ -174,6 +198,7 @@ func (l *LocalWorker) FinalizeSector(ctx context.Context, sector abi.SectorID) e
 		return xerrors.Errorf("removing unsealed data: %w", err)
 	}
 
+	l.triggerWebHook(ctx, sector,nil, Finalize)
 	return nil
 }
 

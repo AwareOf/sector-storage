@@ -5,6 +5,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/hashicorp/go-multierror"
 	"golang.org/x/xerrors"
@@ -16,6 +17,12 @@ import (
 )
 
 const mib = 1 << 20
+const rpcTimeout = 5 * time.Millisecond
+
+type rpcRes struct {
+	isOK bool
+	err error
+}
 
 type WorkerAction func(ctx context.Context, w Worker) error
 
@@ -180,7 +187,7 @@ func (sh *scheduler) onWorkerFreed(wid WorkerID) {
 	for i := 0; i < sh.schedQueue.Len(); i++ {
 		req := (*sh.schedQueue)[i]
 
-		ok, err := req.sel.Ok(req.ctx, req.taskType, sh.spt, w)
+		ok, err :=  OkReq(req, sh.spt, w)
 		if err != nil {
 			log.Errorf("onWorkerFreed req.sel.Ok error: %+v", err)
 			continue
@@ -204,6 +211,46 @@ func (sh *scheduler) onWorkerFreed(wid WorkerID) {
 	}
 }
 
+func OkReq(req *workerRequest, spt abi.RegisteredSealProof, worker *workerHandle) (bool, error)  {
+	rpcCtx, cancel := context.WithTimeout(context.TODO(), rpcTimeout)
+	defer cancel()
+
+	done := make(chan rpcRes)
+	go func() {
+		ok, err := req.sel.Ok(rpcCtx, req.taskType, spt, worker)
+		done <- rpcRes{ok, err}
+	}()
+
+	select {
+	case result := <-done:
+		return result.isOK, result.err
+	case <-rpcCtx.Done():
+		log.Warnf("CAUTION: worker [%v] not maybe offline", worker.info.Hostname)
+		// Can not return false from here.
+		return false, nil
+	}
+}
+
+func CmpReq(req *workerRequest, a, b *workerHandle) (bool, error) {
+	rpcCtx, cancel := context.WithTimeout(context.TODO(), rpcTimeout)
+	defer cancel()
+
+	done := make(chan rpcRes)
+	go func() {
+		ok, err := req.sel.Cmp(rpcCtx, req.taskType, a, b)
+		done <- rpcRes{ok, err}
+	}()
+
+	select {
+	case result := <-done:
+		return result.isOK, result.err
+	case <-rpcCtx.Done():
+		log.Warnf("CAUTION: worker [%v] or worker [%v] maybe offline", a.info.Hostname, b.info.Hostname)
+		// Can not return false from here.
+		return false, nil
+	}
+}
+
 func (sh *scheduler) maybeSchedRequest(req *workerRequest) (bool, error) {
 	sh.workersLk.Lock()
 	defer sh.workersLk.Unlock()
@@ -214,7 +261,7 @@ func (sh *scheduler) maybeSchedRequest(req *workerRequest) (bool, error) {
 	needRes := ResourceTable[req.taskType][sh.spt]
 
 	for wid, worker := range sh.workers {
-		ok, err := req.sel.Ok(req.ctx, req.taskType, sh.spt, worker)
+		ok, err :=  OkReq(req, sh.spt, worker)
 		if err != nil {
 			return false, err
 		}
@@ -236,7 +283,7 @@ func (sh *scheduler) maybeSchedRequest(req *workerRequest) (bool, error) {
 			var serr error
 
 			sort.SliceStable(acceptable, func(i, j int) bool {
-				r, err := req.sel.Cmp(req.ctx, req.taskType, sh.workers[acceptable[i]], sh.workers[acceptable[j]])
+				r, err := CmpReq(req,sh.workers[acceptable[i]], sh.workers[acceptable[j]] )
 				if err != nil {
 					serr = multierror.Append(serr, err)
 				}

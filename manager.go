@@ -164,9 +164,16 @@ func (m *Manager) AddWorker(ctx context.Context, w Worker) error {
 		return xerrors.Errorf("getting worker info: %w", err)
 	}
 
+	// 获取 Worker Task 类型 Map
+	acceptTasks, err := w.TaskTypes(ctx)
+	if err !=nil {
+		return xerrors.Errorf("get worker accept tasks: %w", err)
+	}
+
 	m.sched.newWorkers <- &workerHandle{
 		w:         w,
 		info:      info,
+		acceptTasks: acceptTasks,
 		preparing: &activeResources{},
 		active:    &activeResources{},
 	}

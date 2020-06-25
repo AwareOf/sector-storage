@@ -38,6 +38,8 @@ type scheduler struct {
 	workersLk  sync.Mutex
 	nextWorker WorkerID
 	workers    map[WorkerID]*workerHandle
+	// 根据 worker 支持的工作类型进行分组
+	workerGroups map[sealtasks.TaskType][]*workerHandle
 
 	newWorkers chan *workerHandle
 
@@ -57,6 +59,7 @@ func newScheduler(spt abi.RegisteredSealProof) *scheduler {
 
 		nextWorker: 0,
 		workers:    map[WorkerID]*workerHandle{},
+		workerGroups: map[sealtasks.TaskType][]*workerHandle{},
 
 		newWorkers: make(chan *workerHandle),
 
@@ -138,9 +141,11 @@ type activeResources struct {
 }
 
 type workerHandle struct {
+	id WorkerID
 	w Worker
 
 	info storiface.WorkerInfo
+	acceptTasks map[sealtasks.TaskType]struct{}
 
 	preparing *activeResources
 	active    *activeResources
@@ -226,8 +231,7 @@ func OkReq(req *workerRequest, spt abi.RegisteredSealProof, worker *workerHandle
 		return result.isOK, result.err
 	case <-rpcCtx.Done():
 		log.Warnf("CAUTION: worker [%v] not maybe offline", worker.info.Hostname)
-		// Can not return false from here.
-		return false, nil
+		return false, nil 		// Can not return false from here.
 	}
 }
 
@@ -260,46 +264,77 @@ func (sh *scheduler) maybeSchedRequest(req *workerRequest) (bool, error) {
 
 	needRes := ResourceTable[req.taskType][sh.spt]
 
-	for wid, worker := range sh.workers {
-		ok, err :=  OkReq(req, sh.spt, worker)
-		if err != nil {
-			return false, err
-		}
-
-		if !ok {
-			continue
-		}
-		tried++
-
-		if !canHandleRequest(needRes, sh.spt, wid, worker.info.Resources, worker.preparing) {
-			continue
-		}
-
-		acceptable = append(acceptable, wid)
+	// 获取 task 类型 req.taskType
+	workers, found := sh.workerGroups[req.taskType]
+	if !found {
+		return false, xerrors.Errorf("no worker support task type: %v", req.taskType)
 	}
 
-	if len(acceptable) > 0 {
-		{
-			var serr error
+	// 根据任务类型选择 Worker 分组
 
-			sort.SliceStable(acceptable, func(i, j int) bool {
-				r, err := CmpReq(req,sh.workers[acceptable[i]], sh.workers[acceptable[j]] )
-				if err != nil {
-					serr = multierror.Append(serr, err)
-				}
-				return r
-			})
-
-			if serr != nil {
-				return false, xerrors.Errorf("error(s) selecting best worker: %w", serr)
+	// 只要不是 Precommit2 或者 commit 1 找到一个合适的就直接分配任务
+	if req.taskType == sealtasks.TTPreCommit2 || req.taskType == sealtasks.TTCommit1 {
+		// 根据 task 类型得到合适的 worker 列表
+		// 从 列表 中遍历 worker
+		for _, worker := range workers {
+			ok, err :=  OkReq(req, sh.spt, worker)
+			if err != nil {
+				return false, err
 			}
+
+			if !ok {
+				continue
+			}
+			tried++
+
+			if !canHandleRequest(needRes, sh.spt, worker.id, worker.info.Resources, worker.preparing) {
+				continue
+			}
+
+			acceptable = append(acceptable, worker.id)
 		}
 
-		return true, sh.assignWorker(acceptable[0], sh.workers[acceptable[0]], req)
-	}
+		if len(acceptable) > 0 {
+			{
+				var serr error
 
-	if tried == 0 {
-		return false, xerrors.New("maybeSchedRequest didn't find any good workers")
+				sort.SliceStable(acceptable, func(i, j int) bool {
+					r, err := CmpReq(req,sh.workers[acceptable[i]], sh.workers[acceptable[j]] )
+					if err != nil {
+						serr = multierror.Append(serr, err)
+					}
+					return r
+				})
+
+				if serr != nil {
+					return false, xerrors.Errorf("error(s) selecting best worker: %w", serr)
+				}
+			}
+
+			return true, sh.assignWorker(acceptable[0], sh.workers[acceptable[0]], req)
+		}
+
+		if tried == 0 {
+			return false, xerrors.New("maybeSchedRequest didn't find any good workers")
+		}
+	} else {
+		for _, worker := range workers {
+			ok, err :=  OkReq(req, sh.spt, worker)
+			if err != nil {
+				return false, err
+			}
+
+			if !ok {
+				continue
+			}
+			tried++
+
+			if !canHandleRequest(needRes, sh.spt, worker.id, worker.info.Resources, worker.preparing) {
+				continue
+			}
+
+			return true, sh.assignWorker(worker.id, worker, req)
+		}
 	}
 
 	return false, nil // put in waiting queue
@@ -476,12 +511,36 @@ func (a *activeResources) utilization(wr storiface.WorkerResources) float64 {
 	return max
 }
 
+func (sh *scheduler) addWorkerToGroup(w *workerHandle)  {
+	for taskType := range w.acceptTasks {
+		if group, ok := sh.workerGroups[taskType]; ok{
+			group = append(group, w)
+		} else {
+			sh.workerGroups[taskType] = []*workerHandle{w}
+		}
+	}
+}
+
+func (sh *scheduler) removeWorkerFromGroup(wid WorkerID)  {
+	// 从各个任务组里删除 worker
+	for _, group := range sh.workerGroups {
+		for i := len(group) - 1; i >= 0; i-- {
+			if group[i].id == wid {
+				group = append(group[:i], group[i+1:]...)
+			}
+		}
+	}
+}
+
 func (sh *scheduler) schedNewWorker(w *workerHandle) {
 	sh.workersLk.Lock()
 
 	id := sh.nextWorker
+	w.id = id
 	sh.workers[id] = w
 	sh.nextWorker++
+	// 根据 worker 支持的 task 类型将 worker 放到不同分组
+	sh.addWorkerToGroup(w)
 
 	sh.workersLk.Unlock()
 
@@ -497,7 +556,8 @@ func (sh *scheduler) schedNewWorker(w *workerHandle) {
 func (sh *scheduler) schedDropWorker(wid WorkerID) {
 	sh.workersLk.Lock()
 	defer sh.workersLk.Unlock()
-
+	// 将 worker 从子分组中删除
+	sh.removeWorkerFromGroup(wid)
 	w := sh.workers[wid]
 	delete(sh.workers, wid)
 
